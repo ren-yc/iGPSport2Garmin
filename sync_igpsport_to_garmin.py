@@ -460,6 +460,8 @@ def main():
         logger.error("Missing required environment variables")
         return
 
+    garth.configure(domain=garmin_domain)
+
     # Initialize clients
     igpsport_client = IGPSportClient(igpsport_username, igpsport_password, igpsport_domain, igpsport_referer)
     garmin_client = GarminClient(garmin_email, garmin_password, garmin_domain)
