@@ -14,11 +14,11 @@ import datetime
 import requests
 import tempfile
 import sys
+import garth
 from pathlib import Path
 import logging
 from dateutil.parser import parse
 from dotenv import load_dotenv
-from garminconnect import Garmin
 from typing import Dict, List, Optional, Tuple, Any
 
 fitfaker_dir = Path(__file__).parent / "FitFaker.NET"
@@ -154,11 +154,10 @@ class IGPSportClient:
 class GarminClient:
     """Client for the Garmin Connect API using the garth library."""
 
-    def __init__(self, email: str, password: str, is_cn: bool, max_retries: int = 3, retry_delay: int = 5):
-        self.garmin = Garmin(email = email, password = password, is_cn = is_cn)
+    def __init__(self, email: str, password: str, domain: str, max_retries: int = 3, retry_delay: int = 5):
         self.email = email
         self.password = password
-        self.is_cn = is_cn
+        self.domain = domain
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.authenticated = False
@@ -174,11 +173,18 @@ class GarminClient:
             True if authentication is successful, False otherwise
         """
         try:
-            os.makedirs(GARMIN_SESSION_DIR, exist_ok=True)
+            # Try to load session from file first
+            if not force and self._load_session():
+                logger.info("Loaded existing Garmin session from cache")
+                self.authenticated = True
+                return True
 
             # Perform a new login
             logger.info("Performing new Garmin authentication")
-            self.garmin.login(GARMIN_SESSION_DIR)
+            garth.login(self.email, self.password)
+
+            # Save the session for future use
+            self._save_session()
 
             logger.info("Successfully authenticated with Garmin Connect")
             self.authenticated = True
@@ -186,6 +192,38 @@ class GarminClient:
         except Exception as e:
             logger.error(f"Error authenticating with Garmin Connect: {e}")
             self.authenticated = False
+            return False
+
+    def _save_session(self) -> bool:
+        """Save the current Garmin session to a directory."""
+        try:
+            os.makedirs(GARMIN_SESSION_DIR, exist_ok=True)
+            garth.save(GARMIN_SESSION_DIR)
+            logger.info(f"Garmin session saved to directory: {GARMIN_SESSION_DIR}")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving Garmin session: {e}")
+            return False
+
+    def _load_session(self) -> bool:
+        """Load a saved Garmin session from directory."""
+        try:
+            if not os.path.exists(GARMIN_SESSION_DIR) or not os.path.isdir(GARMIN_SESSION_DIR):
+                logger.info("No saved Garmin session directory found")
+                return False
+
+            garth.resume(GARMIN_SESSION_DIR)
+
+            try:
+                garth.client.username
+                logger.info("Loaded Garmin session is valid")
+                return True
+            except Exception as e:
+                logger.info(f"Loaded Garmin session is invalid or expired: {e}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error loading Garmin session: {e}")
             return False
 
     def get_activities(self, start_date: Optional[datetime.datetime] = None, limit: int = 10) -> List[Dict]:
@@ -199,7 +237,7 @@ class GarminClient:
             params = {"start": 0, "limit": limit}
 
             # Make the request to the Garmin Connect API
-            response = self.garmin.connectapi("/activitylist-service/activities/search/activities", params=params)
+            response = garth.connectapi("/activitylist-service/activities/search/activities", params=params)
             return response if isinstance(response, list) else []
         except Exception as e:
             logger.error(f"Error getting activities from Garmin Connect: {e}")
@@ -237,11 +275,16 @@ class GarminClient:
                     temp_file.write(fit_data)
                     temp_file_path = temp_file.name
 
-                self.garmin.upload_activity(temp_file_path)
+                with open(temp_file_path, "rb") as f:
+                    uploaded = garth.client.upload(f)
+
                 os.unlink(temp_file_path)
 
-                logger.info(f"Successfully uploaded activity to Garmin Connect: {activity_name or 'Unknown Activity'}")
-                return True
+                # Save the session after successful upload to maintain freshness
+                self._save_session()
+
+                logger.info(f"Successfully uploaded activity to Garmin Connect: {uploaded}")
+                return uploaded
 
             except Exception as e:
                 last_error = e
@@ -404,7 +447,7 @@ def main():
     igpsport_password = os.environ.get("IGPSPORT_PASSWORD")
     garmin_email = os.environ.get("GARMIN_EMAIL")
     garmin_password = os.environ.get("GARMIN_PASSWORD")
-    garmin_cn = os.environ.get("GARMIN_CN", 'False') == 'True'
+    garmin_domain = os.environ.get("GARMIN_DOMAIN") or "garmin.com"
 
     # Log the session file location for debugging
     logger.info(f"Garmin session directory location: {os.path.abspath(GARMIN_SESSION_DIR)}")
@@ -413,13 +456,13 @@ def main():
     else:
         logger.info("Garmin session directory does not exist yet")
 
-    if not all([igpsport_domain, igpsport_referer, igpsport_username, igpsport_password, garmin_email, garmin_password]):
+    if not all([igpsport_domain, igpsport_referer, igpsport_username, igpsport_password, garmin_email, garmin_password, garmin_domain]):
         logger.error("Missing required environment variables")
         return
 
     # Initialize clients
     igpsport_client = IGPSportClient(igpsport_username, igpsport_password, igpsport_domain, igpsport_referer)
-    garmin_client = GarminClient(garmin_email, garmin_password, garmin_cn)
+    garmin_client = GarminClient(garmin_email, garmin_password, garmin_domain)
 
     # Authenticate with iGPSport
     if not igpsport_client.login():
